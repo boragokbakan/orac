@@ -41,7 +41,7 @@ if __name__ == "__main__":
                     bootstrap_servers=["redpanda:29092"]
                 )
                 break
-            except kafka.errors.NodeNotReadyError:
+            except (kafka.errors.NodeNotReadyError, kafka.errors.NoBrokersAvailable):
                 print("Waiting for Redpanda...")
                 ...
 
