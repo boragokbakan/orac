@@ -191,6 +191,9 @@ class Experiment(sqlm.SQLModel, table=True):  # type: ignore[call-arg]
             prediction_type = "JSONB"
         elif target.task == tasks.TaskEnum.regression:
             prediction_type = "FLOAT"
+        elif target.task == tasks.TaskEnum.anomaly_detection:
+            prediction_type = "FLOAT"
+
         else:
             raise NotImplementedError
 
@@ -224,6 +227,7 @@ class Experiment(sqlm.SQLModel, table=True):  # type: ignore[call-arg]
         if (
             target.task == tasks.TaskEnum.binary_clf.value
             or target.task == tasks.TaskEnum.regression
+            or target.task == tasks.TaskEnum.anomaly_detection
         ):
 
             processor.execute(
@@ -289,6 +293,38 @@ class Experiment(sqlm.SQLModel, table=True):  # type: ignore[call-arg]
                 CAST(y.{target.key_field} AS INTEGER) = CAST(p.key AS INTEGER)
         )
     )"""
+            )
+
+        elif target.task == tasks.TaskEnum.anomaly_detection:
+            # TODO: This was copied from the binary classification case. It would be nice to have more reusability here.
+            # The assumption is that we have some labels for evaluation.
+            processor.execute(
+                f"""
+            CREATE VIEW performance_{self.id} AS (
+                SELECT
+                    COALESCE(tp / NULLIF((tp + 0.5 * (fp + fn))::FLOAT, 0), 0) AS f1_score,
+                    COALESCE((tn + tp) / NULLIF(total::FLOAT, 0), 0) AS accuracy,
+                    COALESCE(tp / NULLIF((tp + fn)::FLOAT, 0), 0) AS recall,
+                    COALESCE(tp / NULLIF((tp + fp)::FLOAT, 0), 0) AS precision
+                FROM (
+                    -- Confusion matrix
+                    SELECT
+                        COUNT(*) FILTER (WHERE y_pred AND y_true) AS tp,
+                        COUNT(*) FILTER (WHERE y_pred AND NOT y_true) AS fp,
+                        COUNT(*) FILTER (WHERE NOT y_pred AND NOT y_true) AS tn,
+                        COUNT(*) FILTER (WHERE NOT y_pred AND y_true) AS fn,
+                        COUNT(*) AS total
+                    FROM (
+                        -- Labels <> predictions
+                        SELECT
+                            y.{target.target_field} AS y_true,
+                            CAST(p.prediction ->> 'true' AS FLOAT) > 0.5 AS y_pred
+                        FROM predictions_{self.id} p
+                        INNER JOIN {target.name} y ON
+                            CAST(y.{target.key_field} AS INTEGER) = CAST(p.key AS INTEGER)
+                    )
+                )
+            )"""
             )
 
         else:
