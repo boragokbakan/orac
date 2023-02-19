@@ -95,33 +95,52 @@ def run_training(experiment_id):
         experiment = session.get(Experiment, experiment_id)
         target = experiment.target
         processor = target.processor
+        task = target.task
+        sync_seconds = experiment.sync_seconds
 
-    processor.execute(
-        f"""
-    CREATE VIEW learning_queue_{experiment_id} AS (
-        SELECT
-            t.{target.target_field} AS ground_truth,
-            p.feature_set
-        FROM {target.name} t
-        INNER JOIN predictions_{experiment_id} p ON
-            CAST(t.{target.key_field} as INTEGER) = CAST(p.key AS INTEGER)
-    )
-    """
-    )
+    if task == tasks.TaskEnum.anomaly_detection.value:
+        processor.execute(
+            f"""
+        CREATE VIEW learning_queue_{experiment_id} AS (
+            SELECT
+                p.feature_set
+            FROM predictions_{experiment_id} p
+        )
+        """
+        )
+
+    else:
+        processor.execute(
+            f"""
+        CREATE VIEW learning_queue_{experiment_id} AS (
+            SELECT
+                t.{target.target_field} AS ground_truth,
+                p.feature_set
+            FROM {target.name} t
+            INNER JOIN predictions_{experiment_id} p ON
+                CAST(t.{target.key_field} as INTEGER) = CAST(p.key AS INTEGER)
+        )
+        """
+        )
 
     model_obj = dill.loads(experiment.model_state)
     model_last_dumped_at = dt.datetime.now()
     n_samples_trained_on = 0
 
     for sample in processor.stream(f"learning_queue_{experiment_id}"):
-        model_obj.learn(sample["feature_set"], sample["ground_truth"])
+        if task == tasks.TaskEnum.anomaly_detection.value:
+            model_obj.learn(sample["feature_set"])
+        else:
+            model_obj.learn(sample["feature_set"], sample["ground_truth"])
+
         n_samples_trained_on += 1
 
         # Dump models every 30 seconds
         if (now := dt.datetime.now()) - model_last_dumped_at > dt.timedelta(
-            seconds=experiment.sync_seconds
+            seconds=sync_seconds
         ):
             with db.session() as session:
+                experiment = session.get(Experiment, experiment_id)
                 experiment.model_state = dill.dumps(model_obj)
                 experiment.n_samples_trained_on += n_samples_trained_on
                 n_samples_trained_on = 0
@@ -130,12 +149,13 @@ def run_training(experiment_id):
                 model_last_dumped_at = now
 
 
+
 class Experiment(sqlm.SQLModel, table=True):  # type: ignore[call-arg]
     id: int | None = sqlm.Field(default=None, primary_key=True)
     name: str
     model_state: bytes | None = sqlm.Field(default=None)
     n_samples_trained_on: int = sqlm.Field(default=0)
-    sync_seconds: int = sqlm.Field(default=20)
+    sync_seconds: int = sqlm.Field(default=10)
 
     feature_set_id: int = sqlm.Field(foreign_key="feature_set.id")
     feature_set: feature_sets.FeatureSet = sqlm.Relationship(
@@ -162,6 +182,7 @@ class Experiment(sqlm.SQLModel, table=True):  # type: ignore[call-arg]
         model = session.get(models.Model, self.model_id)
         if target.task != model.task:
             raise ValueError("Target and model must have the same task")
+
 
         model = session.get(models.Model, self.model_id)
         self.model_state = model.content
@@ -246,7 +267,7 @@ class Experiment(sqlm.SQLModel, table=True):  # type: ignore[call-arg]
             target = session.get(targets.Target, self.target_id)
             processor = session.get(processors.Processor, target.processor_id)
 
-        if target.task == tasks.TaskEnum.binary_clf.value:
+        if target.task == tasks.TaskEnum.binary_clf:
 
             processor.execute(
                 f"""
@@ -300,31 +321,31 @@ class Experiment(sqlm.SQLModel, table=True):  # type: ignore[call-arg]
             # The assumption is that we have some labels for evaluation.
             processor.execute(
                 f"""
-            CREATE VIEW performance_{self.id} AS (
-                SELECT
-                    COALESCE(tp / NULLIF((tp + 0.5 * (fp + fn))::FLOAT, 0), 0) AS f1_score,
-                    COALESCE((tn + tp) / NULLIF(total::FLOAT, 0), 0) AS accuracy,
-                    COALESCE(tp / NULLIF((tp + fn)::FLOAT, 0), 0) AS recall,
-                    COALESCE(tp / NULLIF((tp + fp)::FLOAT, 0), 0) AS precision
-                FROM (
-                    -- Confusion matrix
+                CREATE VIEW performance_{self.id} AS (
                     SELECT
-                        COUNT(*) FILTER (WHERE y_pred AND y_true) AS tp,
-                        COUNT(*) FILTER (WHERE y_pred AND NOT y_true) AS fp,
-                        COUNT(*) FILTER (WHERE NOT y_pred AND NOT y_true) AS tn,
-                        COUNT(*) FILTER (WHERE NOT y_pred AND y_true) AS fn,
-                        COUNT(*) AS total
+                        COALESCE((2 * tp) / NULLIF((2 * tp + fp + fn)::FLOAT, 0), 0) AS f1_score,
+                        COALESCE((tn + tp) / NULLIF(total::FLOAT, 0), 0) AS accuracy,
+                        COALESCE(tp / NULLIF((tp + fn)::FLOAT, 0), 0) AS recall,
+                        COALESCE(tp / NULLIF((tp + fp)::FLOAT, 0), 0) AS precision
                     FROM (
-                        -- Labels <> predictions
+                        -- Confusion matrix
                         SELECT
-                            y.{target.target_field} AS y_true,
-                            CAST(p.prediction ->> 'true' AS FLOAT) > 0.5 AS y_pred
-                        FROM predictions_{self.id} p
-                        INNER JOIN {target.name} y ON
-                            CAST(y.{target.key_field} AS INTEGER) = CAST(p.key AS INTEGER)
+                            COUNT(*) FILTER (WHERE y_pred AND y_true) AS tp,
+                            COUNT(*) FILTER (WHERE y_pred AND NOT y_true) AS fp,
+                            COUNT(*) FILTER (WHERE NOT y_pred AND NOT y_true) AS tn,
+                            COUNT(*) FILTER (WHERE NOT y_pred AND y_true) AS fn,
+                            COUNT(*) AS total
+                        FROM (
+                            -- Labels <> predictions
+                            SELECT
+                                CAST(y.{target.target_field} AS BOOLEAN) AS y_true,
+                                CAST(p.prediction AS FLOAT) > 0.5 AS y_pred
+                            FROM predictions_{self.id} p
+                            INNER JOIN {target.name} y ON
+                                CAST(y.{target.key_field} AS INTEGER) = CAST(p.key AS INTEGER)
+                        )
                     )
-                )
-            )"""
+                )"""
             )
 
         else:
@@ -392,7 +413,7 @@ def monitor_experiment(experiment_id: int):
         )["n"]
         return {
             "now": dt.datetime.now().isoformat(),
-            "training_progress": experiment.n_samples_trained_on / n_samples
+            "training_progress": f"{experiment.n_samples_trained_on / n_samples} [{experiment.n_samples_trained_on}/{n_samples}]"
             if n_samples
             else 0,
             **processor.get_first_row(f"SELECT * FROM performance_{experiment_id}"),

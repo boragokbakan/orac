@@ -80,7 +80,7 @@ services:
     build: api
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
-    command: celery -A api.experiments worker -c 6  # specify max number of tasks. temp solution to how many experiments can be run at the same time
+    command: celery -A api.experiments worker -c 12  # specify max number of tasks. temp solution to how many experiments can be run at the same time
     depends_on:
       - redis
       - postgres
@@ -142,6 +142,11 @@ services:
       - ./dashboard/grafana_volume:/var/lib/grafana
     depends_on:
       - postgres
+
+  synthesizer:
+    build: examples/fraud
+    depends_on:
+      - redpanda
 
 
 volumes:
