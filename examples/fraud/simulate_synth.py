@@ -30,7 +30,7 @@ if __name__ == "__main__":
 
     dataset = synth.AnomalySine(seed=12345,
                              n_samples=100_000,
-                             n_anomalies=5_000,
+                             n_anomalies=25_000,
                              contextual=True,
                              n_contextual=10)
 
